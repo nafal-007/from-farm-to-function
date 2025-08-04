@@ -162,23 +162,37 @@ if mode == "Consumer":
 
 elif mode == "Supplier":
     st.subheader("🏭 Startup Assistance Plan")
-    uploaded_name = st.text_input("Enter food name (e.g., Rice, Tomato, Milk)")
+    st.info("Upload a photo or enter a food name. We'll identify the item, show process steps, and give dashboard insights.")
 
-    if uploaded_name:
+    # Image upload + fallback name input
+    uploaded_image = st.file_uploader("Upload food photo (optional)", type=["jpg", "png", "jpeg"])
+    uploaded_name = st.text_input("Or enter food name (e.g., Rice, Tomato, Milk)")
+
+    # Determine query string: prefer model in future, for now use text
+    query_name = uploaded_name.strip()
+    if uploaded_image and not query_name:
+        st.markdown("🖼️ Image received (auto-detection placeholder). Please type name if identification is ambiguous.")
+        # placeholder: in future run classifier here to set query_name
+        query_name = st.text_input("If auto-detection failed, type the food name here", "")
+
+    best_match = None
+    score = 0
+    matched_row = {}
+    process_steps = ["Step 1", "Step 2", "Step 3"]
+
+    if query_name:
         choices = df["Food"].unique().tolist()
-        best_match, score = process.extractOne(uploaded_name, choices) if choices else (uploaded_name, 0)
+        best_match, score = process.extractOne(query_name, choices) if choices else (query_name, 0)
         st.markdown(f"**Detected as:** {best_match} (confidence {score}%)")
-        uploaded_image = st.file_uploader("Upload food photo", type=["jpg", "png"])
-if uploaded_image:
-    st.image(uploaded_image, width=200)
-    st.markdown("**Image received.** You can type the food name to help disambiguate.")
-    # future: run model inference here
 
+        if best_match in df["Food"].values:
+            matched_row = df[df["Food"] == best_match].iloc[0]
+            category = best_match.split()[0]
+            process_steps = PROCESS_TEMPLATES.get(category, ["Step 1", "Step 2", "Step 3"])
+        else:
+            matched_row = {}
 
-        matched_row = df[df["Food"] == best_match].iloc[0] if best_match in df["Food"].values else {}
-        category = best_match.split()[0]
-        process_steps = PROCESS_TEMPLATES.get(category, ["Step 1", "Step 2", "Step 3"])
-
+        # Suggested manufacturing process
         st.markdown("#### Suggested Manufacturing Process:")
         for i, step in enumerate(process_steps, 1):
             st.write(f"{i}. {step}")
@@ -188,6 +202,7 @@ if uploaded_image:
         else:
             st.success("✅ Process is leaner. Good start!")
 
+        # Startup plan summary
         st.markdown("#### Quick Startup Plan Report")
         st.write(f"📦 Product: {best_match}")
         st.write(f"🏷️ Category: {matched_row.get('Category', '')}")
@@ -201,16 +216,16 @@ if uploaded_image:
     st.markdown("---")
     st.subheader("📊 Supplier Dashboard")
 
-    # Example: Supplier's fixed location
-    supplier_location = (11.0168, 76.9558)  # Example: Coimbatore
+    # Example supplier location (could be made dynamic later)
+    supplier_location = (11.0168, 76.9558)  # Coimbatore
 
-    # Example demand centers (mock data until real logs from consumer side)
+    # Mock consumer demand centers (will come from real logged data later)
     demand_centers = [
         {"city": "Chennai", "coords": (13.0827, 80.2707), "demand": 120},
         {"city": "Madurai", "coords": (9.9252, 78.1198), "demand": 80},
     ]
 
-    # Metrics
+    # Example metrics (replace with real aggregations when available)
     st.metric("Total Consumer Requests (this week)", 230)
     st.metric("Avg Sustainability Score of your products", "72/100")
     st.metric("Top Inefficiency", "Packaging double-step", delta="Improve by 15%")
@@ -219,7 +234,6 @@ if uploaded_image:
     st.subheader("📍 Demand Map")
     m2 = folium.Map(location=supplier_location, zoom_start=6)
     folium.Marker(location=supplier_location, popup="Your Facility", icon=folium.Icon(color="blue")).add_to(m2)
-
     for center in demand_centers:
         folium.CircleMarker(
             location=center["coords"],
@@ -230,19 +244,21 @@ if uploaded_image:
             fill_opacity=0.6
         ).add_to(m2)
         folium.PolyLine([supplier_location, center["coords"]], color="purple", dash_array="5").add_to(m2)
-
     st_folium(m2, width=700, height=450)
 
-    # Cross-View Link to Consumer Side
+    # Cross-View: link with consumer trace
     st.markdown("---")
     st.subheader("🔗 Cross-View: Consumer & Supplier for Same Food")
     link_food_choice = st.selectbox("Select a food to compare views", sorted(df["Food"].unique()))
 
+    # Consumer snapshot for that food
     consumer_row = df[df["Food"] == link_food_choice].iloc[0]
     st.markdown("### Consumer Perspective")
-    st.write(f"🌍 Origin State: {consumer_row['Origin State']}")
-    st.write(f"📏 Distance to Chennai: {consumer_row['Distance_km']} km")
-    st.write(f"♻️ Sustainability Score: {round(100 - (consumer_row['Carbon_kgCO2e_per_kg'] * 10), 1)}/100")
+    st.write(f"🌍 Origin State: {consumer_row.get('Origin State', '')}")
+    # If you have stored user-selected destination you can show it; fallback distance
+    st.write(f"📏 Distance to Chennai (template): {consumer_row.get('Distance_km', 'N/A')} km")
+    sustainability_score = round(100 - (consumer_row.get('Carbon_kgCO2e_per_kg', 0) * 10), 1)
+    st.write(f"♻️ Sustainability Score: {sustainability_score}/100")
 
     st.markdown("### Supplier Perspective")
     st.write("Suggested Process Steps:", ", ".join(PROCESS_TEMPLATES.get(link_food_choice.split()[0], ['Step 1', 'Step 2'])))
