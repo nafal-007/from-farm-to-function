@@ -5,6 +5,50 @@ from geopy.distance import geodesic
 import folium
 from streamlit_folium import st_folium
 from fuzzywuzzy import process
+import json
+import os
+import datetime
+import openrouteservice
+from openrouteservice import convert
+# Consumer selection logging
+LOG_FILE = "consumer_log.json"
+
+def log_consumer_selection(food, origin, destination):
+    entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "food": food,
+        "origin": origin,
+        "destination": destination
+    }
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            data = json.load(f)
+    else:
+        data = []
+    data.append(entry)
+    with open(LOG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+def get_directions(origin_coord, dest_coord, ors_api_key):
+    client = openrouteservice.Client(key=ors_api_key)
+    coords = ( (origin_coord[1], origin_coord[0]), (dest_coord[1], dest_coord[0]) )  # lon, lat
+    try:
+        route = client.directions(coords, profile='driving-car', format='geojson')
+        summary = route['features'][0]['properties']['summary']
+        steps = []
+        # decode steps if available
+        segments = route['features'][0]['properties'].get('segments', [])
+        for seg in segments:
+            for step in seg.get('steps', []):
+                steps.append(step.get('instruction'))
+        geometry = route['features'][0]['geometry']
+        return {
+            "distance_m": summary.get("distance"),
+            "duration_s": summary.get("duration"),
+            "steps": steps,
+            "geometry": geometry
+        }
+    except Exception as e:
+        return None
 
 DESTINATION = (13.0827, 80.2707)
 
@@ -33,34 +77,88 @@ st.sidebar.title("Navigation")
 mode = st.sidebar.radio("View as:", ["Consumer", "Supplier", "Mentor Bot"])
 
 if mode == "Consumer":
-    st.subheader("🌍 Trace Your Food")
-    food_choice = st.selectbox("Food item", sorted(df["Food"].unique()))
-    row = df[df["Food"] == food_choice].iloc[0]
-    origin_coords = (row.get("Origin Lat", 13.0827), row.get("Origin Lon", 80.2707))
-    distance_km = round(geodesic(origin_coords, DESTINATION).km, 2)
+    st.subheader("🌍 Trace Your Food (Real-time Route)")
+    st.info("Select a food item and define origin/destination. Route, distance, time, and emissions are calculated accurately.")
 
-    col1, col2 = st.columns([1, 2])
-    with col1:
-        st.markdown(f"**Origin State:** {row.get('Origin State', '')}")
-        st.markdown(f"**Category:** {row.get('Category', '')}")
-        st.markdown(f"**Distance to Chennai:** {distance_km} km")
-        st.markdown(f"**Estimated Cost:** ₹{row.get('Cost_INR_per_kg', '')} per kg")
-        st.markdown(f"**Carbon Footprint:** {row.get('Carbon_kgCO2e_per_kg', '')} kg CO₂e/kg")
-        st.markdown(f"**Water Use:** {row.get('Water_liters_per_kg', '')} L/kg")
-    with col2:
+    food_choice = st.selectbox("Food item", sorted(df["Food"].unique()))
+
+    # From / To inputs
+    origin_input = st.text_input("From (e.g., Thanjavur, Tamil Nadu)", "Thanjavur, Tamil Nadu")
+    dest_input = st.text_input("To (e.g., Chennai, Tamil Nadu)", "Chennai, Tamil Nadu")
+
+    # Geocode using Nominatim as fallback (could be replaced for scale)
+    from geopy.geocoders import Nominatim
+    geolocator = Nominatim(user_agent="mealsense")
+    origin_loc = geolocator.geocode(origin_input)
+    dest_loc = geolocator.geocode(dest_input)
+
+    if origin_loc and dest_loc:
+        origin_coords = (origin_loc.latitude, origin_loc.longitude)
+        dest_coords = (dest_loc.latitude, dest_loc.longitude)
+
+        # Directions via OpenRouteService
+        ORS_API_KEY = st.secrets.get("ORS_API_KEY", "")  # store your key in Streamlit secrets or define directly (not recommended)
+        if not ORS_API_KEY:
+            st.warning("OpenRouteService API key missing. Put it in Streamlit secrets as ORS_API_KEY.")
+        route_info = None
+        if ORS_API_KEY:
+            route_info = get_directions(origin_coords, dest_coords, ORS_API_KEY)
+
+        # Fallback distance if directions failed
+        from geopy.distance import geodesic
+        if route_info:
+            distance_km = round(route_info["distance_m"] / 1000, 2)
+            duration_min = round(route_info["duration_s"] / 60, 1)
+        else:
+            distance_km = round(geodesic(origin_coords, dest_coords).km, 2)
+            duration_min = None
+
+        # Log this selection for demand aggregation
+        log_consumer_selection(food_choice, origin_input, dest_input)
+
+        # Show details
+        st.markdown(f"**Distance:** {distance_km} km")
+        if duration_min:
+            st.markdown(f"**Estimated Travel Time:** {duration_min} minutes")
+        # Simple transport carbon: factor (e.g., 0.002 kg CO2 per km per kg)
+        transport_co2 = distance_km * 0.002
+        st.markdown(f"**Transport Carbon Footprint (approx):** {transport_co2:.2f} kg CO₂e")
+
+        # Show matched food metadata
+        row = df[df["Food"] == food_choice].iloc[0]
+        st.markdown(f"**Origin State (template):** {row['Origin State']}")
+        st.markdown(f"**Category:** {row['Category']}")
+        st.markdown(f"**Estimated Cost:** ₹{row['Cost_INR_per_kg']} per kg")
+        st.markdown(f"**Base Carbon Footprint:** {row['Carbon_kgCO2e_per_kg']} kg CO₂e/kg")
+        st.markdown(f"**Water Use:** {row['Water_liters_per_kg']} L/kg")
+
+        # Nutrition
         st.subheader("Nutrition (approx)")
         if pd.notna(row.get("Calories_per_100g")):
-            st.write(f"Calories: {row.get('Calories_per_100g')}")
-            st.write(f"Protein: {row.get('Protein_g')} g")
-            st.write(f"Carbs: {row.get('Carbs_g')} g")
-            st.write(f"Fat: {row.get('Fat_g')} g")
+            st.write(f"Calories: {row['Calories_per_100g']}")
+            st.write(f"Protein: {row['Protein_g']} g")
+            st.write(f"Carbs: {row['Carbs_g']} g")
+            st.write(f"Fat: {row['Fat_g']} g")
 
-    st.subheader("🗺️ Route Map")
-    m = folium.Map(location=[(origin_coords[0] + DESTINATION[0]) / 2, (origin_coords[1] + DESTINATION[1]) / 2], zoom_start=5)
-    folium.Marker(location=origin_coords, popup=f"Origin: {row.get('Food')} ({row.get('Origin State')})", icon=folium.Icon(color='green')).add_to(m)
-    folium.Marker(location=DESTINATION, popup="Chennai (Delivery)", icon=folium.Icon(color='red')).add_to(m)
-    folium.PolyLine([origin_coords, DESTINATION], color='blue', weight=2.5).add_to(m)
-    st_folium(m, width=700, height=450)
+        # Directions steps
+        if route_info and route_info.get("steps"):
+            st.subheader("🔀 Directions")
+            for step in route_info["steps"]:
+                st.write(f"- {step}")
+
+        # Map
+        st.subheader("🗺️ Route Map")
+        m = folium.Map(location=[(origin_coords[0]+dest_coords[0])/2, (origin_coords[1]+dest_coords[1])/2], zoom_start=6)
+        folium.Marker(location=origin_coords, popup=f"Origin: {origin_input}", icon=folium.Icon(color="green")).add_to(m)
+        folium.Marker(location=dest_coords, popup=f"Destination: {dest_input}", icon=folium.Icon(color="red")).add_to(m)
+        if route_info and route_info.get("geometry"):
+            folium.GeoJson(route_info["geometry"], name="route").add_to(m)
+        else:
+            folium.PolyLine([origin_coords, dest_coords], color="blue", weight=2.5).add_to(m)
+        st_folium(m, width=700, height=450)
+    else:
+        st.warning("Could not geocode origin or destination. Try more specific place names.")
+
 
 elif mode == "Supplier":
     st.subheader("🏭 Startup Assistance Plan")
@@ -70,6 +168,12 @@ elif mode == "Supplier":
         choices = df["Food"].unique().tolist()
         best_match, score = process.extractOne(uploaded_name, choices) if choices else (uploaded_name, 0)
         st.markdown(f"**Detected as:** {best_match} (confidence {score}%)")
+        uploaded_image = st.file_uploader("Upload food photo", type=["jpg", "png"])
+if uploaded_image:
+    st.image(uploaded_image, width=200)
+    st.markdown("**Image received.** You can type the food name to help disambiguate.")
+    # future: run model inference here
+
 
         matched_row = df[df["Food"] == best_match].iloc[0] if best_match in df["Food"].values else {}
         category = best_match.split()[0]
