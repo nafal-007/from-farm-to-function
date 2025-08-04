@@ -5,3 +5,4 @@ folium
 streamlit-folium
 fuzzywuzzy[speedup]
 python-Levenshtein
+openrouteservice
